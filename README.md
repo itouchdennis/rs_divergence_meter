@@ -31,7 +31,17 @@ Run:
 ```bash
 cargo run
 ```
-
+## Autostart with niri
+1) Build and install the binary:
+```bash
+cargo build --release
+mkdir -p ~/.local/bin
+cp target/release/nixie-wallpaper ~/.local/bin/
+```
+2) Add it to your niri config:
+```ini
+exec = ["~/.local/bin/nixie-wallpaper"]
+```
 ## Tuning
 Edit constants in `src/main.rs` for scale, timing, and layout:
 - `TUBE_SCALE`, `SPACING`
