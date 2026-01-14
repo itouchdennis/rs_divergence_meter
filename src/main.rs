@@ -11,8 +11,8 @@ use std::path::Path;
 const TUBE_COUNT: i32 = 12;
 const DOT_IDX: i32 = 1;
 const FIRST_GROUP_END: i32 = 6;
-const LEAD_CYCLE: [i32; 3] = [0, 1, 3];
-const LEAD_RATE: i32 = 8;
+const LEAD_CYCLE: [i32; 2] = [0, 1];
+const LEAD_RATE: i32 = 30;
 const TAIL_RATE: i32 = 2;
 const FIRST_GROUP_RATE: i32 = 10;
 const SPACING: f64 = 12.0;
@@ -28,6 +28,7 @@ struct Assets {
     background: ImageSurface,
     digits: Vec<ImageSurface>,
     dot: ImageSurface,
+    empty: ImageSurface,
 }
 
 struct ScaledSurface {
@@ -101,8 +102,15 @@ fn load_assets() -> Assets {
     }
     let dot_raw = load_surface(base.join("dot.png"));
     let dot = scale_surface(&dot_raw, TUBE_SCALE);
+    let empty_raw = load_surface(base.join("empty.png"));
+    let empty = scale_surface(&empty_raw, TUBE_SCALE);
 
-    Assets { background, digits, dot }
+    Assets {
+        background,
+        digits,
+        dot,
+        empty,
+    }
 }
 
 fn load_surface(path: impl AsRef<Path>) -> ImageSurface {
@@ -150,6 +158,17 @@ fn should_redraw(current_tick: i32, next_tick: i32) -> bool {
         }
     }
     false
+}
+
+fn should_show_empty(tick: i32, idx: i32) -> bool {
+    if idx != 6 && idx != 7 {
+        return false;
+    }
+    let hash = (tick as u32)
+        .wrapping_mul(1103515245)
+        .wrapping_add(12345)
+        .wrapping_add(idx as u32 * 9973);
+    hash % 20 == 0
 }
 
 // Use cairo from GTK; the context is provided by the draw callback.
@@ -211,6 +230,11 @@ fn draw_nixies(
 
         if idx_i32 == DOT_IDX {
             draw_surface(&assets.dot, x, y, 1.0);
+            continue;
+        }
+
+        if should_show_empty(tick, idx_i32) {
+            draw_surface(&assets.empty, x, y, 1.0);
             continue;
         }
 
