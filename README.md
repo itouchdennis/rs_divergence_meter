@@ -40,7 +40,7 @@ cp target/release/nixie-wallpaper ~/.local/bin/
 ```
 2) Add it to your niri config:
 ```ini
-exec = ["~/.local/bin/nixie-wallpaper"]
+spawn-at-startup "sh" "-c" "sleep 1 && PATH_TO/nixie-wallpaper"
 ```
 ## Tuning
 Edit constants in `src/main.rs` for scale, timing, and layout:
