@@ -11,7 +11,12 @@ Inspired by the Steins;Gate divergence meter aesthetic. El Psy Congroo.
 - Simple change blur by drawing the previous digit with small offsets.
 
 ## Assets
-Place PNGs under `src/assets`:
+Create the assets folder and place PNGs under `src/assets`:
+```bash
+mkdir -p src/assets
+```
+
+Required filenames:
 - `fond.png` (background)
 - `0.png` ... `9.png` (digits)
 - `dot.png` (separator)
