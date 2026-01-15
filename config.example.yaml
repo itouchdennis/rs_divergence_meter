@@ -1,0 +1,11 @@
+tube_count: 12
+dot_idx: 1
+first_group_end: 6
+lead_rate: 30
+spacing: 12.0
+tube_scale: 1.0
+step_ms: 50
+hold_ms: 5000
+step_interval_range: 3
+empty_indices: [6, 7]
+empty_chance_mod: 20

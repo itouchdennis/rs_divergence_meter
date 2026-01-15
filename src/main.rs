@@ -2,22 +2,178 @@ use gtk4::prelude::*;
 use cairo::{Context, Format, ImageSurface};
 use gtk4::{Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Layer, LayerShell, KeyboardMode};
+use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::fs::File;
+use std::env;
+use std::fs::{self, File};
 use std::io::BufReader;
-use std::rc::Rc;
 use std::path::Path;
+use std::rc::Rc;
+use std::time::SystemTime;
 
-const TUBE_COUNT: i32 = 12;
-const DOT_IDX: i32 = 1;
-const FIRST_GROUP_END: i32 = 6;
-const LEAD_RATE: i32 = 30;
-const SPACING: f64 = 12.0;
-const TUBE_SCALE: f64 = 1.0;
-const STEP_MS: u64 = 50;
-const HOLD_MS: u64 = 5000;
-const HOLD_STEPS: i32 = (HOLD_MS / STEP_MS) as i32;
-const STEP_INTERVAL_RANGE: i32 = 3;
+#[derive(Deserialize, Serialize)]
+#[serde(default)]
+struct Config {
+    tube_count: i32,
+    dot_idx: i32,
+    first_group_end: i32,
+    lead_rate: i32,
+    spacing: f64,
+    tube_scale: f64,
+    step_ms: u64,
+    hold_ms: u64,
+    step_interval_range: i32,
+    empty_indices: Vec<i32>,
+    empty_chance_mod: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            tube_count: 12,
+            dot_idx: 1,
+            first_group_end: 6,
+            lead_rate: 30,
+            spacing: 12.0,
+            tube_scale: 1.0,
+            step_ms: 50,
+            hold_ms: 5000,
+            step_interval_range: 3,
+            empty_indices: vec![6, 7],
+            empty_chance_mod: 20,
+        }
+    }
+}
+
+impl Config {
+    fn load() -> Self {
+        let mut config = if let Some(path) = config_path() {
+            ensure_config_file(&path);
+            match fs::read_to_string(&path) {
+                Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        eprintln!("Failed to parse config {:?}: {err}", path);
+                        Config::default()
+                    }
+                },
+                Err(_) => Config::default(),
+            }
+        } else {
+            Config::default()
+        };
+        config.normalize();
+        config
+    }
+
+    fn normalize(&mut self) {
+        if self.tube_count < 1 {
+            self.tube_count = 1;
+        }
+        self.dot_idx = self.dot_idx.clamp(0, self.tube_count - 1);
+        if self.first_group_end < 0 {
+            self.first_group_end = 0;
+        }
+        if self.first_group_end > self.tube_count {
+            self.first_group_end = self.tube_count;
+        }
+        if self.lead_rate < 1 {
+            self.lead_rate = 1;
+        }
+        if self.step_ms == 0 {
+            self.step_ms = 50;
+        }
+        if self.hold_ms == 0 {
+            self.hold_ms = 5000;
+        }
+        if self.step_interval_range < 1 {
+            self.step_interval_range = 1;
+        }
+        if self.empty_chance_mod == 0 {
+            self.empty_chance_mod = 20;
+        }
+        if self.empty_indices.is_empty() {
+            self.empty_indices = vec![6, 7];
+        }
+    }
+
+    fn hold_steps(&self) -> i32 {
+        ((self.hold_ms / self.step_ms).max(1)) as i32
+    }
+}
+
+fn config_path() -> Option<std::path::PathBuf> {
+    env::var("HOME")
+        .ok()
+        .map(|home| Path::new(&home).join(".config/divergence_meter/config.yaml"))
+}
+
+fn ensure_config_file(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("Failed to create config dir {:?}: {err}", parent);
+            return;
+        }
+    }
+    match serde_yaml::to_string(&Config::default()) {
+        Ok(contents) => {
+            if let Err(err) = fs::write(path, contents) {
+                eprintln!("Failed to write config {:?}: {err}", path);
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to serialize default config: {err}");
+        }
+    }
+}
+
+struct ConfigState {
+    config: Config,
+    path: Option<std::path::PathBuf>,
+    last_modified: Option<SystemTime>,
+}
+
+impl ConfigState {
+    fn load() -> Self {
+        let path = config_path();
+        if let Some(ref p) = path {
+            ensure_config_file(p);
+        }
+        let config = Config::load();
+        let last_modified = path
+            .as_ref()
+            .and_then(|p| fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        Self {
+            config,
+            path,
+            last_modified,
+        }
+    }
+
+    fn reload_if_changed(&mut self) -> bool {
+        let Some(ref path) = self.path else {
+            return false;
+        };
+        let Some(modified) = fs::metadata(path).ok().and_then(|m| m.modified().ok()) else {
+            return false;
+        };
+        let needs_reload = match self.last_modified {
+            Some(prev) => modified > prev,
+            None => true,
+        };
+        if !needs_reload {
+            return false;
+        }
+        let config = Config::load();
+        self.config = config;
+        self.last_modified = Some(modified);
+        true
+    }
+}
 
 fn main() {
     let app = Application::new(Some("com.example.nixiewallpaper"), Default::default());
@@ -55,6 +211,8 @@ struct AnimState {
     cycle: i32,
 }
 
+const BASE_TICK_MS: u64 = 10;
+
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::new(app);
 
@@ -72,21 +230,27 @@ fn build_ui(app: &Application) {
     window.set_decorated(false);
 
     let area = DrawingArea::new();
-    let assets = Rc::new(load_assets());
+    let config_state = Rc::new(RefCell::new(ConfigState::load()));
+    let assets = Rc::new(RefCell::new(load_assets(&config_state.borrow().config)));
     let tick = Rc::new(Cell::new(0));
-    let state = Rc::new(RefCell::new(init_state()));
+    let acc_ms = Rc::new(Cell::new(0u64));
+    let state = Rc::new(RefCell::new(init_state(&config_state.borrow().config)));
     let cache = Rc::new(RefCell::new(RenderCache { bg_scaled: None }));
 
+    let config_for_draw = Rc::clone(&config_state);
     let assets_for_draw = Rc::clone(&assets);
     let tick_for_draw = Rc::clone(&tick);
     let state_for_draw = Rc::clone(&state);
     let cache_for_draw = Rc::clone(&cache);
     area.set_draw_func(move |_, cr, width, height| {
+        let config = &config_for_draw.borrow().config;
+        let assets = assets_for_draw.borrow();
         draw_nixies(
             cr,
             width,
             height,
-            &assets_for_draw,
+            config,
+            &assets,
             &cache_for_draw,
             &state_for_draw,
             tick_for_draw.get(),
@@ -97,31 +261,56 @@ fn build_ui(app: &Application) {
     window.present();
 
     let tick_for_timer = Rc::clone(&tick);
+    let acc_for_timer = Rc::clone(&acc_ms);
+    let config_for_timer = Rc::clone(&config_state);
     let state_for_timer = Rc::clone(&state);
-    glib::timeout_add_local(std::time::Duration::from_millis(STEP_MS), move || {
-        let current = tick_for_timer.get();
-        let next = current.wrapping_add(1);
-        tick_for_timer.set(next);
-        if update_state(next, &state_for_timer) {
+    let assets_for_timer = Rc::clone(&assets);
+    let cache_for_timer = Rc::clone(&cache);
+    glib::timeout_add_local(std::time::Duration::from_millis(BASE_TICK_MS), move || {
+        let mut reloaded = false;
+        {
+            let mut cfg_state = config_for_timer.borrow_mut();
+            if cfg_state.reload_if_changed() {
+                reloaded = true;
+                *assets_for_timer.borrow_mut() = load_assets(&cfg_state.config);
+                *state_for_timer.borrow_mut() = init_state(&cfg_state.config);
+                cache_for_timer.borrow_mut().bg_scaled = None;
+            }
+        }
+        let mut should_draw = reloaded;
+        let mut acc = acc_for_timer.get().saturating_add(BASE_TICK_MS);
+        let step_ms = config_for_timer.borrow().config.step_ms;
+        while acc >= step_ms {
+            acc -= step_ms;
+            let current = tick_for_timer.get();
+            let next = current.wrapping_add(1);
+            tick_for_timer.set(next);
+            let cfg = config_for_timer.borrow();
+            if update_state(next, &cfg.config, &state_for_timer) {
+                should_draw = true;
+            }
+        }
+        acc_for_timer.set(acc);
+        if should_draw {
             area.queue_draw();
         }
         glib::ControlFlow::Continue
     });
 }
 
-fn load_assets() -> Assets {
+fn load_assets(config: &Config) -> Assets {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets");
     let background = load_surface(base.join("fond.png"));
 
     let mut digits = Vec::with_capacity(10);
     for i in 0..10 {
         let raw = load_surface(base.join(format!("{i}.png")));
-        digits.push(scale_surface(&raw, TUBE_SCALE));
+        digits.push(scale_surface(&raw, config.tube_scale));
     }
     let dot_raw = load_surface(base.join("dot.png"));
-    let dot = scale_surface(&dot_raw, TUBE_SCALE);
+    let dot = scale_surface(&dot_raw, config.tube_scale);
     let empty_raw = load_surface(base.join("empty.png"));
-    let empty = scale_surface(&empty_raw, TUBE_SCALE);
+    let empty = scale_surface(&empty_raw, config.tube_scale);
 
     Assets {
         background,
@@ -159,9 +348,9 @@ fn random_digit(step: i32, idx: i32, salt: u32) -> usize {
     (x % 10) as usize
 }
 
-fn init_state() -> AnimState {
-    let mut digits = Vec::with_capacity(TUBE_COUNT as usize);
-    for _ in 0..TUBE_COUNT {
+fn init_state(config: &Config) -> AnimState {
+    let mut digits = Vec::with_capacity(config.tube_count as usize);
+    for _ in 0..config.tube_count {
         digits.push(DigitState {
             current: 0,
             previous: 0,
@@ -171,12 +360,12 @@ fn init_state() -> AnimState {
     }
     let mut state = AnimState {
         digits,
-        hold_left: HOLD_STEPS,
+        hold_left: config.hold_steps(),
         cycle: 0,
     };
-    generate_targets(&mut state);
-    for idx in 0..TUBE_COUNT {
-        if idx as i32 == DOT_IDX {
+    generate_targets(config, &mut state);
+    for idx in 0..config.tube_count {
+        if idx as i32 == config.dot_idx {
             continue;
         }
         let digit = &mut state.digits[idx as usize];
@@ -186,33 +375,34 @@ fn init_state() -> AnimState {
     state
 }
 
-fn generate_targets(state: &mut AnimState) {
-    for idx in 0..TUBE_COUNT {
+fn generate_targets(config: &Config, state: &mut AnimState) {
+    for idx in 0..config.tube_count {
         let idx_i32 = idx as i32;
-        if idx_i32 == DOT_IDX {
+        if idx_i32 == config.dot_idx {
             continue;
         }
-        let cycle_key = if idx_i32 == 0 {
-            state.cycle / LEAD_RATE
-        } else {
-            state.cycle
-        };
+        let cycle_key = state.cycle;
         let target = if idx_i32 == 0 {
-            random_digit(cycle_key, idx_i32, 0xA341_316C) % 2
-        } else if idx_i32 < FIRST_GROUP_END {
+            let roll = random_digit(cycle_key, idx_i32, 0xA341_316C);
+            if roll % ((config.lead_rate as usize * 4) / 5) == 0 {
+                if (roll / config.lead_rate as usize) % 2 == 0 { 1 } else { 2 }
+            } else {
+                0
+            }
+        } else if idx_i32 < config.first_group_end {
             random_digit(cycle_key, idx_i32, 0x9E37_79B9)
         } else {
             random_digit(cycle_key, idx_i32, 0x85EB_CA6B)
         };
         let step_interval =
-            1 + (random_digit(state.cycle, idx_i32, 0xC2B2_AE35) as i32 % STEP_INTERVAL_RANGE);
+            1 + (random_digit(state.cycle, idx_i32, 0xC2B2_AE35) as i32 % config.step_interval_range);
         let digit = &mut state.digits[idx as usize];
         digit.target = target;
         digit.step_interval = step_interval;
     }
 }
 
-fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
+fn update_state(tick: i32, config: &Config, state: &RefCell<AnimState>) -> bool {
     let mut changed = false;
     let mut state = state.borrow_mut();
 
@@ -222,8 +412,8 @@ fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
     }
 
     let mut all_reached = true;
-    for idx in 0..TUBE_COUNT {
-        if idx as i32 == DOT_IDX {
+    for idx in 0..config.tube_count {
+        if idx as i32 == config.dot_idx {
             continue;
         }
         let digit = &state.digits[idx as usize];
@@ -235,12 +425,12 @@ fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
 
     if all_reached {
         state.cycle += 1;
-        generate_targets(&mut state);
+        generate_targets(config, &mut state);
     }
 
-    for idx in 0..TUBE_COUNT {
+    for idx in 0..config.tube_count {
         let idx_i32 = idx as i32;
-        if idx_i32 == DOT_IDX {
+        if idx_i32 == config.dot_idx {
             continue;
         }
         let digit = &mut state.digits[idx as usize];
@@ -259,8 +449,8 @@ fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
     }
 
     let mut all_reached_after = true;
-    for idx in 0..TUBE_COUNT {
-        if idx as i32 == DOT_IDX {
+    for idx in 0..config.tube_count {
+        if idx as i32 == config.dot_idx {
             continue;
         }
         let digit = &state.digits[idx as usize];
@@ -271,21 +461,21 @@ fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
     }
 
     if all_reached_after {
-        state.hold_left = HOLD_STEPS;
+        state.hold_left = config.hold_steps();
     }
 
     changed
 }
 
-fn should_show_empty(tick: i32, idx: i32) -> bool {
-    if idx != 6 && idx != 7 {
+fn should_show_empty(tick: i32, idx: i32, config: &Config) -> bool {
+    if !config.empty_indices.contains(&idx) {
         return false;
     }
     let hash = (tick as u32)
         .wrapping_mul(1103515245)
         .wrapping_add(12345)
         .wrapping_add(idx as u32 * 9973);
-    hash % 20 == 0
+    hash % config.empty_chance_mod == 0
 }
 
 // Use cairo from GTK; the context is provided by the draw callback.
@@ -293,6 +483,7 @@ fn draw_nixies(
     cr: &Context,
     width: i32,
     height: i32,
+    config: &Config,
     assets: &Assets,
     cache: &RefCell<RenderCache>,
     state: &RefCell<AnimState>,
@@ -328,7 +519,8 @@ fn draw_nixies(
 
     let digit_w = assets.digits[0].width() as f64;
     let digit_h = assets.digits[0].height() as f64;
-    let total_w = TUBE_COUNT as f64 * digit_w + (TUBE_COUNT as f64 - 1.0) * SPACING;
+    let total_w =
+        config.tube_count as f64 * digit_w + (config.tube_count as f64 - 1.0) * config.spacing;
     let start_x = (width as f64 - total_w) / 2.0;
     let start_y = (height as f64 - digit_h) / 2.0;
 
@@ -342,17 +534,17 @@ fn draw_nixies(
     };
 
     let state = state.borrow();
-    for idx in 0..TUBE_COUNT {
+    for idx in 0..config.tube_count {
         let idx_i32 = idx as i32;
-        let x = start_x + idx as f64 * (digit_w + SPACING);
+        let x = start_x + idx as f64 * (digit_w + config.spacing);
         let y = start_y;
 
-        if idx_i32 == DOT_IDX {
+        if idx_i32 == config.dot_idx {
             draw_surface(&assets.dot, x, y, 1.0);
             continue;
         }
 
-        if should_show_empty(tick, idx_i32) {
+        if should_show_empty(tick, idx_i32, config) {
             draw_surface(&assets.empty, x, y, 1.0);
             continue;
         }
