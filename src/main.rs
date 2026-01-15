@@ -34,6 +34,8 @@ struct Config {
     tube_align_x: HorizAlign,
     tube_align_y: VertAlign,
     bg_scale_mode: BgScaleMode,
+    lead_chance_mod: u32,
+    lead_hold_cycles: i32,
 }
 
 impl Default for Config {
@@ -59,6 +61,8 @@ impl Default for Config {
             tube_align_x: HorizAlign::Center,
             tube_align_y: VertAlign::Center,
             bg_scale_mode: BgScaleMode::Stretch,
+            lead_chance_mod: 8,
+            lead_hold_cycles: 10,
         }
     }
 }
@@ -109,6 +113,12 @@ impl Config {
         }
         if self.empty_chance_mod == 0 {
             self.empty_chance_mod = 20;
+        }
+        if self.lead_chance_mod == 0 {
+            self.lead_chance_mod = 8;
+        }
+        if self.lead_hold_cycles < 0 {
+            self.lead_hold_cycles = 0;
         }
         if self.empty_indices.is_empty() {
             self.empty_indices = vec![6, 7];
@@ -266,6 +276,8 @@ struct AnimState {
     digits: Vec<DigitState>,
     hold_left: i32,
     cycle: i32,
+    lead_hold_left: i32,
+    lead_hold_value: usize,
 }
 
 const BASE_TICK_MS: u64 = 10;
@@ -463,6 +475,8 @@ fn init_state(config: &Config) -> AnimState {
         digits,
         hold_left: config.hold_steps(),
         cycle: 0,
+        lead_hold_left: 0,
+        lead_hold_value: 0,
     };
     generate_targets(config, &mut state);
     for idx in 0..config.tube_count {
@@ -484,11 +498,19 @@ fn generate_targets(config: &Config, state: &mut AnimState) {
         }
         let cycle_key = state.cycle;
         let target = if idx_i32 == 0 {
-            let roll = random_digit(cycle_key, idx_i32, 0xA341_316C);
-            if roll % ((config.lead_rate as usize * 4) / 5) == 0 {
-                if (roll / config.lead_rate as usize) % 2 == 0 { 1 } else { 2 }
+            if state.lead_hold_left > 0 {
+                state.lead_hold_left -= 1;
+                state.lead_hold_value
             } else {
-                0
+                let roll = random_digit(cycle_key, idx_i32, 0xA341_316C);
+                if roll % (config.lead_chance_mod as usize) == 0 {
+                    let value = if roll % 2 == 0 { 1 } else { 2 };
+                    state.lead_hold_left = config.lead_hold_cycles;
+                    state.lead_hold_value = value;
+                    value
+                } else {
+                    0
+                }
             }
         } else if idx_i32 < config.first_group_end {
             random_digit(cycle_key, idx_i32, 0x9E37_79B9)

@@ -18,3 +18,5 @@ tube_offset_y: 0.0
 tube_align_x: center
 tube_align_y: center
 bg_scale_mode: stretch
+lead_chance_mod: 8
+lead_hold_cycles: 10
