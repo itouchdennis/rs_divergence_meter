@@ -1,4 +1,4 @@
 /target/
 /build/
-/src/assets/
+#/src/assets/
 .git
