@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::env;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -25,6 +25,15 @@ struct Config {
     step_interval_range: i32,
     empty_indices: Vec<i32>,
     empty_chance_mod: u32,
+    background_path: Option<String>,
+    digit_paths: Option<Vec<String>>,
+    dot_path: Option<String>,
+    empty_path: Option<String>,
+    tube_offset_x: f64,
+    tube_offset_y: f64,
+    tube_align_x: HorizAlign,
+    tube_align_y: VertAlign,
+    bg_scale_mode: BgScaleMode,
 }
 
 impl Default for Config {
@@ -41,6 +50,15 @@ impl Default for Config {
             step_interval_range: 3,
             empty_indices: vec![6, 7],
             empty_chance_mod: 20,
+            background_path: None,
+            digit_paths: None,
+            dot_path: None,
+            empty_path: None,
+            tube_offset_x: 0.0,
+            tube_offset_y: 0.0,
+            tube_align_x: HorizAlign::Center,
+            tube_align_y: VertAlign::Center,
+            bg_scale_mode: BgScaleMode::Stretch,
         }
     }
 }
@@ -94,6 +112,20 @@ impl Config {
         }
         if self.empty_indices.is_empty() {
             self.empty_indices = vec![6, 7];
+        }
+        if matches!(self.background_path.as_deref(), Some(s) if s.trim().is_empty()) {
+            self.background_path = None;
+        }
+        if matches!(self.dot_path.as_deref(), Some(s) if s.trim().is_empty()) {
+            self.dot_path = None;
+        }
+        if matches!(self.empty_path.as_deref(), Some(s) if s.trim().is_empty()) {
+            self.empty_path = None;
+        }
+        if let Some(paths) = &self.digit_paths {
+            if paths.is_empty() {
+                self.digit_paths = None;
+            }
         }
     }
 
@@ -198,6 +230,31 @@ struct RenderCache {
     bg_scaled: Option<ScaledSurface>,
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum BgScaleMode {
+    Stretch,
+    Fit,
+    Fill,
+    Center,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum HorizAlign {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum VertAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
 struct DigitState {
     current: usize,
     previous: usize,
@@ -299,17 +356,38 @@ fn build_ui(app: &Application) {
 }
 
 fn load_assets(config: &Config) -> Assets {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets");
-    let background = load_surface(base.join("fond.png"));
+    let background_path = config
+        .background_path
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("src/assets/fond.png"));
+    let background = load_surface(resolve_asset_path(background_path));
 
     let mut digits = Vec::with_capacity(10);
     for i in 0..10 {
-        let raw = load_surface(base.join(format!("{i}.png")));
+        let path = config
+            .digit_paths
+            .as_ref()
+            .and_then(|paths| paths.get(i))
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("src/assets/{i}.png")));
+        let raw = load_surface(resolve_asset_path(&path));
         digits.push(scale_surface(&raw, config.tube_scale));
     }
-    let dot_raw = load_surface(base.join("dot.png"));
+    let dot_path = config
+        .dot_path
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("src/assets/dot.png"));
+    let dot_raw = load_surface(resolve_asset_path(dot_path));
     let dot = scale_surface(&dot_raw, config.tube_scale);
-    let empty_raw = load_surface(base.join("empty.png"));
+    let empty_path = config
+        .empty_path
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("src/assets/empty.png"));
+    let empty_raw = load_surface(resolve_asset_path(empty_path));
     let empty = scale_surface(&empty_raw, config.tube_scale);
 
     Assets {
@@ -324,6 +402,29 @@ fn load_surface(path: impl AsRef<Path>) -> ImageSurface {
     let file = File::open(path).expect("Failed to open image");
     let mut reader = BufReader::new(file);
     ImageSurface::create_from_png(&mut reader).expect("Failed to load PNG")
+}
+
+fn resolve_asset_path(path: &Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+}
+
+fn align_offset(align: HorizAlign, container: f64, content: f64) -> f64 {
+    match align {
+        HorizAlign::Left => 0.0,
+        HorizAlign::Center => (container - content) / 2.0,
+        HorizAlign::Right => container - content,
+    }
+}
+
+fn align_offset_y(align: VertAlign, container: f64, content: f64) -> f64 {
+    match align {
+        VertAlign::Top => 0.0,
+        VertAlign::Center => (container - content) / 2.0,
+        VertAlign::Bottom => container - content,
+    }
 }
 
 fn scale_surface(surface: &ImageSurface, scale: f64) -> ImageSurface {
@@ -501,8 +602,48 @@ fn draw_nixies(
             let scaled = ImageSurface::create(Format::ARgb32, width, height)
                 .expect("Failed to create background surface");
             let ctx = Context::new(&scaled).expect("Failed to create cairo context");
-            let scale_x = width as f64 / bg_w;
-            let scale_y = height as f64 / bg_h;
+            let width_f = width as f64;
+            let height_f = height as f64;
+            let (scale_x, scale_y, offset_x, offset_y) = match config.bg_scale_mode {
+                BgScaleMode::Stretch => {
+                    let sx = width_f / bg_w;
+                    let sy = height_f / bg_h;
+                    (sx, sy, 0.0, 0.0)
+                }
+                BgScaleMode::Fit => {
+                    let scale = (width_f / bg_w).min(height_f / bg_h);
+                    let draw_w = bg_w * scale;
+                    let draw_h = bg_h * scale;
+                    (
+                        scale,
+                        scale,
+                        (width_f - draw_w) / 2.0,
+                        (height_f - draw_h) / 2.0,
+                    )
+                }
+                BgScaleMode::Fill => {
+                    let scale = (width_f / bg_w).max(height_f / bg_h);
+                    let draw_w = bg_w * scale;
+                    let draw_h = bg_h * scale;
+                    (
+                        scale,
+                        scale,
+                        (width_f - draw_w) / 2.0,
+                        (height_f - draw_h) / 2.0,
+                    )
+                }
+                BgScaleMode::Center => {
+                    let draw_w = bg_w;
+                    let draw_h = bg_h;
+                    (
+                        1.0,
+                        1.0,
+                        (width_f - draw_w) / 2.0,
+                        (height_f - draw_h) / 2.0,
+                    )
+                }
+            };
+            ctx.translate(offset_x, offset_y);
             ctx.scale(scale_x, scale_y);
             ctx.set_source_surface(&assets.background, 0.0, 0.0).unwrap();
             ctx.paint().unwrap();
@@ -521,8 +662,10 @@ fn draw_nixies(
     let digit_h = assets.digits[0].height() as f64;
     let total_w =
         config.tube_count as f64 * digit_w + (config.tube_count as f64 - 1.0) * config.spacing;
-    let start_x = (width as f64 - total_w) / 2.0;
-    let start_y = (height as f64 - digit_h) / 2.0;
+    let start_x =
+        align_offset(config.tube_align_x, width as f64, total_w) + config.tube_offset_x;
+    let start_y =
+        align_offset_y(config.tube_align_y, height as f64, digit_h) + config.tube_offset_y;
 
     let draw_surface = |surface: &ImageSurface, x: f64, y: f64, alpha: f64| {
         cr.set_source_surface(surface, x, y).unwrap();

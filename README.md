@@ -83,6 +83,11 @@ Edit constants in `src/main.rs` for scale, timing, and layout:
 You can override timing and layout via `~/.config/divergence_meter/config.yaml`.
 If the file doesn't exist, it is created on first run. Changes are reloaded at runtime.
 See `config.example.yaml` for a full example.
+Image paths can be absolute or relative to the project root.
+Alignment values:
+- `tube_align_x`: `left`, `center`, `right`
+- `tube_align_y`: `top`, `center`, `bottom`
+- `bg_scale_mode`: `stretch`, `fit`, `fill`, `center`
 
 Example:
 ```yaml
@@ -97,4 +102,13 @@ hold_ms: 5000
 step_interval_range: 3
 empty_indices: [6, 7]
 empty_chance_mod: 20
+background_path: null
+digit_paths: null
+dot_path: null
+empty_path: null
+tube_offset_x: 0.0
+tube_offset_y: 0.0
+tube_align_x: center
+tube_align_y: center
+bg_scale_mode: stretch
 ```

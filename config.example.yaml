@@ -9,3 +9,12 @@ hold_ms: 5000
 step_interval_range: 3
 empty_indices: [6, 7]
 empty_chance_mod: 20
+background_path: null
+digit_paths: null
+dot_path: null
+empty_path: null
+tube_offset_x: 0.0
+tube_offset_y: 0.0
+tube_align_x: center
+tube_align_y: center
+bg_scale_mode: stretch
