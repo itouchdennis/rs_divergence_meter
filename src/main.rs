@@ -11,12 +11,13 @@ use std::path::Path;
 const TUBE_COUNT: i32 = 12;
 const DOT_IDX: i32 = 1;
 const FIRST_GROUP_END: i32 = 6;
-const LEAD_CYCLE: [i32; 2] = [0, 1];
 const LEAD_RATE: i32 = 30;
-const TAIL_RATE: i32 = 2;
-const FIRST_GROUP_RATE: i32 = 10;
 const SPACING: f64 = 12.0;
 const TUBE_SCALE: f64 = 1.0;
+const STEP_MS: u64 = 50;
+const HOLD_MS: u64 = 5000;
+const HOLD_STEPS: i32 = (HOLD_MS / STEP_MS) as i32;
+const STEP_INTERVAL_RANGE: i32 = 3;
 
 fn main() {
     let app = Application::new(Some("com.example.nixiewallpaper"), Default::default());
@@ -41,6 +42,19 @@ struct RenderCache {
     bg_scaled: Option<ScaledSurface>,
 }
 
+struct DigitState {
+    current: usize,
+    previous: usize,
+    target: usize,
+    step_interval: i32,
+}
+
+struct AnimState {
+    digits: Vec<DigitState>,
+    hold_left: i32,
+    cycle: i32,
+}
+
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::new(app);
 
@@ -60,10 +74,12 @@ fn build_ui(app: &Application) {
     let area = DrawingArea::new();
     let assets = Rc::new(load_assets());
     let tick = Rc::new(Cell::new(0));
+    let state = Rc::new(RefCell::new(init_state()));
     let cache = Rc::new(RefCell::new(RenderCache { bg_scaled: None }));
 
     let assets_for_draw = Rc::clone(&assets);
     let tick_for_draw = Rc::clone(&tick);
+    let state_for_draw = Rc::clone(&state);
     let cache_for_draw = Rc::clone(&cache);
     area.set_draw_func(move |_, cr, width, height| {
         draw_nixies(
@@ -72,6 +88,7 @@ fn build_ui(app: &Application) {
             height,
             &assets_for_draw,
             &cache_for_draw,
+            &state_for_draw,
             tick_for_draw.get(),
         );
     });
@@ -80,11 +97,12 @@ fn build_ui(app: &Application) {
     window.present();
 
     let tick_for_timer = Rc::clone(&tick);
-    glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
+    let state_for_timer = Rc::clone(&state);
+    glib::timeout_add_local(std::time::Duration::from_millis(STEP_MS), move || {
         let current = tick_for_timer.get();
         let next = current.wrapping_add(1);
         tick_for_timer.set(next);
-        if should_redraw(current, next) {
+        if update_state(next, &state_for_timer) {
             area.queue_draw();
         }
         glib::ControlFlow::Continue
@@ -133,31 +151,130 @@ fn scale_surface(surface: &ImageSurface, scale: f64) -> ImageSurface {
     dst
 }
 
-fn digit_for_idx(tick: i32, idx: i32) -> Option<usize> {
-    if idx == DOT_IDX {
-        return None;
-    }
-    if idx == 0 {
-        let group_tick = tick / FIRST_GROUP_RATE;
-        let step = (group_tick / LEAD_RATE).rem_euclid(LEAD_CYCLE.len() as i32) as usize;
-        return Some(LEAD_CYCLE[step] as usize);
-    }
-    if idx < FIRST_GROUP_END {
-        let group_tick = tick / FIRST_GROUP_RATE;
-        let value = (group_tick + idx).rem_euclid(10) as usize;
-        return Some(value);
-    }
-    let value = ((tick / TAIL_RATE) + idx).rem_euclid(10) as usize;
-    Some(value)
+fn random_digit(step: i32, idx: i32, salt: u32) -> usize {
+    let mut x = (step as u32).wrapping_add(salt);
+    x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+    x ^= (idx as u32).wrapping_mul(2246822519);
+    x = x ^ (x >> 16);
+    (x % 10) as usize
 }
 
-fn should_redraw(current_tick: i32, next_tick: i32) -> bool {
+fn init_state() -> AnimState {
+    let mut digits = Vec::with_capacity(TUBE_COUNT as usize);
+    for _ in 0..TUBE_COUNT {
+        digits.push(DigitState {
+            current: 0,
+            previous: 0,
+            target: 0,
+            step_interval: 1,
+        });
+    }
+    let mut state = AnimState {
+        digits,
+        hold_left: HOLD_STEPS,
+        cycle: 0,
+    };
+    generate_targets(&mut state);
     for idx in 0..TUBE_COUNT {
-        if digit_for_idx(current_tick, idx) != digit_for_idx(next_tick, idx) {
-            return true;
+        if idx as i32 == DOT_IDX {
+            continue;
+        }
+        let digit = &mut state.digits[idx as usize];
+        digit.current = digit.target;
+        digit.previous = digit.target;
+    }
+    state
+}
+
+fn generate_targets(state: &mut AnimState) {
+    for idx in 0..TUBE_COUNT {
+        let idx_i32 = idx as i32;
+        if idx_i32 == DOT_IDX {
+            continue;
+        }
+        let cycle_key = if idx_i32 == 0 {
+            state.cycle / LEAD_RATE
+        } else {
+            state.cycle
+        };
+        let target = if idx_i32 == 0 {
+            random_digit(cycle_key, idx_i32, 0xA341_316C) % 2
+        } else if idx_i32 < FIRST_GROUP_END {
+            random_digit(cycle_key, idx_i32, 0x9E37_79B9)
+        } else {
+            random_digit(cycle_key, idx_i32, 0x85EB_CA6B)
+        };
+        let step_interval =
+            1 + (random_digit(state.cycle, idx_i32, 0xC2B2_AE35) as i32 % STEP_INTERVAL_RANGE);
+        let digit = &mut state.digits[idx as usize];
+        digit.target = target;
+        digit.step_interval = step_interval;
+    }
+}
+
+fn update_state(tick: i32, state: &RefCell<AnimState>) -> bool {
+    let mut changed = false;
+    let mut state = state.borrow_mut();
+
+    if state.hold_left > 0 {
+        state.hold_left -= 1;
+        return false;
+    }
+
+    let mut all_reached = true;
+    for idx in 0..TUBE_COUNT {
+        if idx as i32 == DOT_IDX {
+            continue;
+        }
+        let digit = &state.digits[idx as usize];
+        if digit.current != digit.target {
+            all_reached = false;
+            break;
         }
     }
-    false
+
+    if all_reached {
+        state.cycle += 1;
+        generate_targets(&mut state);
+    }
+
+    for idx in 0..TUBE_COUNT {
+        let idx_i32 = idx as i32;
+        if idx_i32 == DOT_IDX {
+            continue;
+        }
+        let digit = &mut state.digits[idx as usize];
+        digit.previous = digit.current;
+
+        if digit.current == digit.target {
+            continue;
+        }
+        if tick % digit.step_interval != 0 {
+            continue;
+        }
+
+        let radix = if idx_i32 == 0 { 2 } else { 10 };
+        digit.current = ((digit.current as i32 + 1).rem_euclid(radix)) as usize;
+        changed = true;
+    }
+
+    let mut all_reached_after = true;
+    for idx in 0..TUBE_COUNT {
+        if idx as i32 == DOT_IDX {
+            continue;
+        }
+        let digit = &state.digits[idx as usize];
+        if digit.current != digit.target {
+            all_reached_after = false;
+            break;
+        }
+    }
+
+    if all_reached_after {
+        state.hold_left = HOLD_STEPS;
+    }
+
+    changed
 }
 
 fn should_show_empty(tick: i32, idx: i32) -> bool {
@@ -178,6 +295,7 @@ fn draw_nixies(
     height: i32,
     assets: &Assets,
     cache: &RefCell<RenderCache>,
+    state: &RefCell<AnimState>,
     tick: i32,
 ) {
     let bg_w = assets.background.width() as f64;
@@ -223,6 +341,7 @@ fn draw_nixies(
         }
     };
 
+    let state = state.borrow();
     for idx in 0..TUBE_COUNT {
         let idx_i32 = idx as i32;
         let x = start_x + idx as f64 * (digit_w + SPACING);
@@ -238,8 +357,9 @@ fn draw_nixies(
             continue;
         }
 
-        let current = digit_for_idx(tick, idx_i32).unwrap();
-        let previous = digit_for_idx(tick - 1, idx_i32).unwrap();
+        let digit = &state.digits[idx as usize];
+        let current = digit.current;
+        let previous = digit.previous;
 
         if current != previous {
             let prev_surface = &assets.digits[previous];

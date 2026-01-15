@@ -22,6 +22,28 @@ Prerequisites:
 - GTK4 development packages
 - Wayland session
 
+### Debian/Ubuntu
+Install dependencies:
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libgtk-4-dev
+```
+Install Rust (recommended via rustup):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### Arch Linux
+Install dependencies:
+```bash
+sudo pacman -S --needed base-devel pkgconf gtk4
+```
+Install Rust (if not installed):
+```bash
+sudo pacman -S --needed rustup
+rustup default stable
+```
+
 Build:
 ```bash
 cargo build
