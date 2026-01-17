@@ -1,5 +1,6 @@
 use gtk4::prelude::*;
 use cairo::{Context, Format, ImageSurface};
+use chrono::{Local, Timelike};
 use gtk4::{Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Layer, LayerShell, KeyboardMode};
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,8 @@ struct Config {
     bg_scale_mode: BgScaleMode,
     lead_chance_mod: u32,
     lead_hold_cycles: i32,
+    mode: DisplayMode,
+    clock_format: String,
 }
 
 impl Default for Config {
@@ -63,6 +66,8 @@ impl Default for Config {
             bg_scale_mode: BgScaleMode::Stretch,
             lead_chance_mod: 8,
             lead_hold_cycles: 10,
+            mode: DisplayMode::Divergence,
+            clock_format: "HH:MM:SS".to_string(),
         }
     }
 }
@@ -131,6 +136,9 @@ impl Config {
         }
         if matches!(self.empty_path.as_deref(), Some(s) if s.trim().is_empty()) {
             self.empty_path = None;
+        }
+        if self.clock_format.trim().is_empty() {
+            self.clock_format = "HH:MM:SS".to_string();
         }
         if let Some(paths) = &self.digit_paths {
             if paths.is_empty() {
@@ -265,6 +273,13 @@ enum VertAlign {
     Bottom,
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DisplayMode {
+    Divergence,
+    Clock,
+}
+
 struct DigitState {
     current: usize,
     previous: usize,
@@ -278,6 +293,7 @@ struct AnimState {
     cycle: i32,
     lead_hold_left: i32,
     lead_hold_value: usize,
+    clock_display: Vec<ClockGlyph>,
 }
 
 const BASE_TICK_MS: u64 = 10;
@@ -477,15 +493,20 @@ fn init_state(config: &Config) -> AnimState {
         cycle: 0,
         lead_hold_left: 0,
         lead_hold_value: 0,
+        clock_display: Vec::new(),
     };
-    generate_targets(config, &mut state);
-    for idx in 0..config.tube_count {
-        if idx as i32 == config.dot_idx {
-            continue;
+    if config.mode == DisplayMode::Clock {
+        state.clock_display = build_clock_display(&config.clock_format);
+    } else {
+        generate_targets(config, &mut state);
+        for idx in 0..config.tube_count {
+            if idx as i32 == config.dot_idx {
+                continue;
+            }
+            let digit = &mut state.digits[idx as usize];
+            digit.current = digit.target;
+            digit.previous = digit.target;
         }
-        let digit = &mut state.digits[idx as usize];
-        digit.current = digit.target;
-        digit.previous = digit.target;
     }
     state
 }
@@ -528,6 +549,15 @@ fn generate_targets(config: &Config, state: &mut AnimState) {
 fn update_state(tick: i32, config: &Config, state: &RefCell<AnimState>) -> bool {
     let mut changed = false;
     let mut state = state.borrow_mut();
+
+    if config.mode == DisplayMode::Clock {
+        let next_display = build_clock_display(&config.clock_format);
+        if next_display != state.clock_display {
+            state.clock_display = next_display;
+            changed = true;
+        }
+        return changed;
+    }
 
     if state.hold_left > 0 {
         state.hold_left -= 1;
@@ -699,6 +729,28 @@ fn draw_nixies(
     };
 
     let state = state.borrow();
+    if config.mode == DisplayMode::Clock {
+        let display = &state.clock_display;
+        for idx in 0..config.tube_count {
+            let x = start_x + idx as f64 * (digit_w + config.spacing);
+            let y = start_y;
+            let Some(glyph) = display.get(idx as usize) else {
+                draw_surface(&assets.empty, x, y, 1.0);
+                continue;
+            };
+            match glyph {
+                ClockGlyph::Digit(value) => {
+                    let tex = &assets.digits[*value];
+                    draw_surface(tex, x, y, 1.0);
+                }
+                ClockGlyph::Separator => {
+                    draw_surface(&assets.dot, x, y, 1.0);
+                }
+            }
+        }
+        return;
+    }
+
     for idx in 0..config.tube_count {
         let idx_i32 = idx as i32;
         let x = start_x + idx as f64 * (digit_w + config.spacing);
@@ -729,4 +781,111 @@ fn draw_nixies(
         let tex = &assets.digits[current];
         draw_surface(tex, x, y, 1.0);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClockGlyph {
+    Digit(usize),
+    Separator,
+}
+
+fn push_two_digits(value: u32, out: &mut Vec<ClockGlyph>) {
+    let tens = (value / 10) as usize;
+    let ones = (value % 10) as usize;
+    out.push(ClockGlyph::Digit(tens));
+    out.push(ClockGlyph::Digit(ones));
+}
+
+fn push_one_or_two_digits(value: u32, out: &mut Vec<ClockGlyph>) {
+    if value >= 10 {
+        push_two_digits(value, out);
+    } else {
+        out.push(ClockGlyph::Digit(value as usize));
+    }
+}
+
+fn build_clock_display(format: &str) -> Vec<ClockGlyph> {
+    let now = Local::now();
+    let mut out = Vec::new();
+    let bytes = format.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let remaining = &format[idx..];
+        if remaining.starts_with("HH") {
+            push_two_digits(now.hour() as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with("hh") {
+            let mut hour = now.hour() % 12;
+            if hour == 0 {
+                hour = 12;
+            }
+            push_two_digits(hour as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with("MM") {
+            push_two_digits(now.minute() as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with("mm") {
+            push_two_digits(now.minute() as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with("SS") {
+            push_two_digits(now.second() as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with("ss") {
+            push_two_digits(now.second() as u32, &mut out);
+            idx += 2;
+            continue;
+        }
+        if remaining.starts_with('H') {
+            push_one_or_two_digits(now.hour() as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        if remaining.starts_with('h') {
+            let mut hour = now.hour() % 12;
+            if hour == 0 {
+                hour = 12;
+            }
+            push_one_or_two_digits(hour as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        if remaining.starts_with('M') {
+            push_one_or_two_digits(now.minute() as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        if remaining.starts_with('m') {
+            push_one_or_two_digits(now.minute() as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        if remaining.starts_with('S') {
+            push_one_or_two_digits(now.second() as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        if remaining.starts_with('s') {
+            push_one_or_two_digits(now.second() as u32, &mut out);
+            idx += 1;
+            continue;
+        }
+        let ch = remaining.chars().next().unwrap();
+        if ch.is_ascii_digit() {
+            out.push(ClockGlyph::Digit(ch.to_digit(10).unwrap() as usize));
+        } else {
+            out.push(ClockGlyph::Separator);
+        }
+        idx += ch.len_utf8();
+    }
+    out
 }

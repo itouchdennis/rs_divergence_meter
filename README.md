@@ -88,6 +88,9 @@ Alignment values:
 - `tube_align_x`: `left`, `center`, `right`
 - `tube_align_y`: `top`, `center`, `bottom`
 - `bg_scale_mode`: `stretch`, `fit`, `fill`, `center`
+Display values:
+- `mode`: `divergence`, `clock`
+- `clock_format`: tokens `HH`, `hh`, `MM`, `mm`, `SS`, `ss` (single-letter variants allowed); non-digits become separators
 
 Example:
 ```yaml
@@ -113,4 +116,6 @@ tube_align_y: center
 bg_scale_mode: stretch
 lead_chance_mod: 8
 lead_hold_cycles: 10
+mode: divergence
+clock_format: HH:MM:SS
 ```
